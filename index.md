@@ -41,21 +41,21 @@ A eso se suma la restricción del negocio: el cliente es una pyme. Un costo por 
 La llamada es una cadena de tres etapas con un plano de decisión determinista en el medio.
 
 <pre class="mermaid">
-flowchart LR
-    N["Navegador<br/>micrófono + AudioWorklet<br/>PCM 16 kHz"] -- "WebSocket" --> S
+flowchart TB
+    N["Navegador: micrófono, PCM 16 kHz"]
+    N -- "WebSocket" --> T
     subgraph S["Servidor de la llamada (Python, FastAPI)"]
-        direction TB
-        T["Cierre de turno<br/>600 ms de silencio"] --> O["Oír"]
-        O --> G["Guion determinista<br/>reglas + catálogo real"]
-        G -- "entendió" --> R["Frase exacta<br/>cifras en letras"]
-        G -- "no entendió" --> W["Reescritura<br/>+ filtro"]
+        T["Cierre de turno: 600 ms de silencio"] --> O["Oír"]
+        O --> G["Guion determinista: reglas + datos reales"]
+        G -- "no entendió" --> W["Reescritura + filtro"]
         W -- "frase limpia" --> G
+        G -- "entendió" --> R["Frase exacta, cifras en letras"]
         R --> H["Hablar"]
     end
-    O <--> A[("LFM3-Audio-2B<br/>llama.cpp")]
-    H <--> A
-    W <--> M[("MiMo-V2.6 9B<br/>llama.cpp")]
-    G <--> D[("PostgreSQL<br/>catálogo, envíos,<br/>horario")]
+    O <-.-> A[("LFM3-Audio-2B (llama.cpp)")]
+    H <-.-> A
+    W <-.-> M[("MiMo-V2.6 9B (llama.cpp)")]
+    G <-.-> D[("PostgreSQL: catálogo, envíos, horario")]
     H -- "audio 24 kHz + texto" --> N
 </pre>
 
