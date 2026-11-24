@@ -1,5 +1,5 @@
 title: Su asistente de voz no necesita un cerebro gigante
-description: Lo que aprendimos construyendo llamadas de voz con un modelo pequeño, reglas y 1.362 frases de prueba.
+description: Arquitectura, mediciones y errores de un agente de voz para comercio que corre con un modelo de 9B y otro de 2B en un servidor propio.
 lang: es
-theme: jekyll-theme-minimal
+theme: jekyll-theme-cayman
 show_downloads: false

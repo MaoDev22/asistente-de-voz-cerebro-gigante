@@ -1,6 +1,6 @@
 # Su asistente de voz no necesita un cerebro gigante
 
-Artículo de Marlon Torres Lozano sobre las llamadas de voz de Zentria: un modelo pequeño que solo reescribe lo que no se entiende, reglas que deciden y un filtro que impide inventar.
+Artículo técnico de Marlon Torres Lozano sobre las llamadas de voz de Zentria: arquitectura, modelos (MiMo-V2.6 9B y LFM3-Audio-2B sobre llama.cpp), desglose de latencia, ablaciones y análisis de errores sobre 1.362 turnos.
 
 Léelo en: https://maodev22.github.io/asistente-de-voz-cerebro-gigante/
 

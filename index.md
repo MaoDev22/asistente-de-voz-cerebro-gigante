@@ -4,131 +4,394 @@ title: Su asistente de voz no necesita un cerebro gigante
 
 # Su asistente de voz no necesita un cerebro gigante
 
-*Lo que aprendimos construyendo las llamadas de voz de Zentria para una ferretería, con un modelo pequeño, un servidor propio y 1.362 frases de prueba.*
+**Arquitectura, mediciones y errores de un agente de voz para comercio que corre con un modelo de 9B y otro de 2B en un servidor propio.**
 
-Por: Marlon Torres Lozano
-
----
-
-## «Dermatrés»
-
-Un cliente llama a una ferretería. Acaba de preguntar el precio de un tomacorriente y, satisfecho, dice: «deme tres».
-
-Lo que el sistema recibe, después de pasar por el micrófono de un celular, el ruido de la calle y un programa que convierte voz en texto, es esto:
-
-> Dermatrés.
-
-No existe esa palabra. Ninguna regla la reconoce. Y aquí aparece la tentación que hoy domina la industria: poner detrás un modelo de lenguaje enorme, darle todo el catálogo y dejar que él resuelva. Entenderá «Dermatrés», entenderá cualquier cosa.
-
-Nosotros probamos el camino contrario. Usamos un modelo pequeño, que corre en nuestro propio servidor, y le quitamos casi todas las responsabilidades. El resultado fue una llamada que acierta más, se equivoca de forma menos grave y responde antes. Este artículo cuenta cómo, con las cifras, y también dice con claridad qué no hemos demostrado.
-
-## El día que dejamos decidir al modelo
-
-Nuestra llamada funciona en cadena: un modelo de voz oye, un guion de reglas decide qué responder con los datos reales de la tienda, y el modelo de voz lee la respuesta. Las reglas son rápidas y nunca inventan, pero tienen un límite: de 1.362 frases de prueba, entendían 1.214. En 142 casos ninguna regla reconocía lo dicho.
-
-La solución obvia era pasarle esos casos al modelo y que decidiera él: qué quiere el cliente y de qué producto habla. Lo medimos.
-
-Acertó un poco más: 1.228. Pero ocurrió algo que el número de aciertos escondía. Nuestro medidor cuenta aparte los turnos **dañinos**: aquellos donde el sistema haría o afirmaría algo equivocado, como hablar de otro producto o agregar al carrito lo que nadie pidió. Con las reglas solas había 9. Con el modelo decidiendo, **29**.
-
-El patrón era siempre el mismo. Un cliente pregunta si venden candados. La tienda no vende candados. El modelo, servicial, escoge lo más parecido que encuentra en el catálogo y la llamada responde con el precio de unos guantes. Otro pide un taladro percutor y recibe la ficha de un alicate.
-
-Un modelo de lenguaje casi nunca dice «no sé». Completa. Es su naturaleza, y en una conversación escrita se le perdona porque uno puede releer y corregir. En una llamada, lo dicho en voz alta ya se dijo.
-
-## La idea: que aclare, no que decida
-
-El cambio fue pequeño en código y grande en resultado. En lugar de pedirle al modelo que interpretara la frase, le pedimos una sola cosa: **reescribirla en limpio**. Nada más. Después, las mismas reglas de siempre leen la frase reescrita y responden con sus datos.
-
-«Dermatrés» se convierte en «Deme tres». Las reglas, que sí entienden «Deme tres», saben de qué producto se venía hablando y preguntan: «¿Agrego tres unidades de tomacorriente doble a tu carrito?».
-
-La diferencia con el experimento anterior está en quién tiene la última palabra. Si el cliente pregunta por candados, el modelo escribe «¿Tienen candados?» y son las reglas las que buscan en el catálogo, no encuentran nada y responden lo correcto: «Eso no lo encuentro en la tienda». El modelo ya no tiene oportunidad de ser servicial con datos que no existen.
-
-Tres decisiones de diseño sostienen esto:
-
-1. **El modelo solo entra cuando las reglas fallan.** Nueve de cada diez frases nunca pasan por él y se responden en milisegundos.
-2. **El modelo no elige producto, precio ni respuesta.** Solo aclara qué se dijo.
-3. **Nada de lo que escribe se usa sin revisar.** De eso se encarga un filtro.
-
-## El filtro: prohibido lo que el cliente no dijo
-
-Reescribir tampoco es inocente. A la frase «Deme tres bulticos pues», nuestro modelo le agregó de su cosecha: «Deme tres bombillos LED». A un simple ruido, «Kss prr tk», le inventó una pregunta por el precio de un alicate.
-
-Por eso cada reescritura pasa un filtro de reglas fijas antes de aceptarse. La frase reescrita no puede traer:
-
-- **Un producto que no suene en lo que se dijo.** «Bombillos» no aparece, ni de lejos, en «bulticos».
-- **Una cantidad que no se dijo**, en cifras o en palabras.
-- **Una ciudad que no se dijo** o que no se reconoce.
-- **Un envase que no corresponde.** Si el cliente dice «écheme dos bolsas», no pueden ser los tornillos que vienen por caja.
-- **Un «sí» que decida el carrito.** Agregar siempre exige que la persona confirme con su propia voz.
-- **Un cambio de tema.** «¿Y dan factura electrónica?» no puede volverse «¿Dónde quedan?».
-
-El filtro compara por sonido, no por letras. «Lievo» y «llevo» son lo mismo; «dermatrés» contiene «tres». Es la parte menos vistosa del sistema y la que más pesa: sin ella, la reescritura repetiría el problema que queríamos evitar.
-
-Cuando el filtro frena una frase, la llamada no improvisa. Dice «No te entendí bien, ¿me lo repites?», que es la verdad.
-
-## Enseñar con ejemplos, no con órdenes
-
-La primera versión rescataba pocas frases. El modelo reescribía bien, pero no en la forma que las reglas esperan: dejaba «¿Cómo quedó el pedido?» cuando las reglas entienden «¿Qué llevo en el carrito?». En frases muy dañadas se desviaba: «Dermatrés» llegó a salir como «Deme uno».
-
-La mejora vino de una sugerencia sencilla: en vez de explicarle más, mostrarle. Agregamos al aviso veinte ejemplos de lo que entra y lo que debe salir.
-
-Los ejemplos son de otra tienda, una papelería con cuadernos y lapiceros, a propósito. Así el modelo aprende la forma sin tomar prestados productos, y no le enseñamos las respuestas del examen con el que lo medimos.
-
-El efecto fue doble. Las reescrituras aprovechadas pasaron de 27 a 48, y el modelo se volvió más rápido, de 0,74 a 0,61 segundos, porque dejó de divagar.
-
-## Las cifras
-
-Todo se midió con bancos de frases etiquetadas, 1.362 turnos en total: 764 escritos y 598 tal como llegan transcritos por el modelo de voz, con sus errores.
-
-| Quién decide | Turnos bien | Turnos dañinos | Tiempo del modelo |
-|---|---|---|---|
-| Solo las reglas | 1.214 (89 %) | 9 | — |
-| El modelo decide intención y producto | 1.228 | 29 | 0,62 s |
-| El modelo reescribe, deciden las reglas, con filtro | 1.232 | 10 | 0,74 s |
-| Lo mismo, con ejemplos | 1.251 (92 %) | 10 | 0,61 s |
-
-El turno dañino de más merece una nota. A quien quiso decir «deme dos», la llamada le pregunta «¿Agrego una unidad?». No agrega nada; el cliente responde que no y sigue. Antes, esa persona oía «no te entendí».
-
-Y el tiempo: 0,61 segundos de mediana, 0,73 en el peor diez por ciento, y solo en los turnos que antes fallaban. Para comparar, las guías de la industria ponen como meta alrededor de un segundo para toda la respuesta de un agente de voz en cadena.
-
-## Por qué un cerebro pequeño alcanza
-
-La respuesta corta: porque el trabajo que le dejamos es pequeño.
-
-Reescribir una frase de ocho palabras exige mucho menos que sostener una conversación, consultar un catálogo y decidir una venta. Un modelo pequeño hace bien lo primero. Lo segundo lo hace mal, y no solo el nuestro. En pruebas anteriores, cuando dejamos que el modelo respondiera libremente preguntas que no tenían respuesta en los datos, inventó en 29 de 48: «sí, tenemos parqueadero», «sí, hacemos factura electrónica». Un estudio reciente que puso modelos pequeños a atender llamadas completas encontró que los más pequeños se degradan hasta producir turnos interminables y sin sentido.
-
-Tampoco los modelos grandes salen ilesos de la voz. Un banco de pruebas citado en ese mismo estudio reporta que los agentes de voz más avanzados conservan apenas entre 30 y 45 % del éxito que tienen por escrito. Son tareas más amplias que la nuestra y la comparación no es directa, pero apunta a lo mismo: en una llamada, el problema difícil no se resuelve con tamaño.
-
-Se resuelve repartiendo bien. Las reglas hacen lo que exige exactitud: precios, existencias, carrito. El modelo hace lo que exige flexibilidad: entender a una persona que habla como habla la gente. Y un filtro vigila la frontera entre los dos.
-
-Hay además razones prácticas que a una empresa pequeña le importan más que cualquier banco de pruebas. El modelo corre en un servidor propio: las conversaciones de los clientes no salen a un tercero, no hay un cobro por cada llamada y la velocidad no depende de la congestión de un servicio ajeno.
-
-## Lo que este artículo no demuestra
-
-Sería deshonesto terminar sin esto.
-
-- **No comparamos contra un modelo grande.** El título dice que no hace falta un cerebro gigante porque con uno pequeño llegamos a 92 % en nuestras pruebas. No dice que uno gigante lo haría peor: esa prueba no la hemos hecho.
-- **Los bancos de frases son nuestros**, de una ferretería, en español colombiano. En otro negocio o en otro idioma, las cifras serán otras.
-- **El filtro se ajustó mirando esos mismos bancos.** Con frases nuevas rendirá algo menos. Hicimos una comprobación aparte con 16 frases que no estaban en ninguno: las reglas ya entendían 10; de las otras 6, la reescritura rescató 3, una no era de la tienda y el filtro frenó 2. Es una buena señal y una muestra pequeña.
-- **Falta la prueba que importa:** llamadas de clientes reales, durante semanas.
-- **Las ideas no son nuevas por separado.** Reescribir la frase antes de interpretarla lo publicó Amazon para Alexa hace años; parafrasear hacia una forma que un sistema determinista entiende es una técnica conocida; verificar lo que un modelo corrige es un área activa de investigación. Lo nuestro es la combinación, el filtro por sonido y haber medido el daño, no solo el acierto.
-
-## La lección
-
-Durante dos años la pregunta de moda fue cuál modelo es el más grande. Para quien construye un producto, la pregunta útil es otra: **¿cuál es la tarea más pequeña que puedo darle al modelo?**
-
-Cada responsabilidad que se le quita es un error que ya no puede cometer. Al nuestro le quitamos el catálogo, los precios, el carrito y la última palabra. Le dejamos una frase mal oída y la instrucción de escribirla bien.
-
-Con eso, «Dermatrés» volvió a ser tres tomacorrientes.
+Por: Marlon Torres Lozano · Zentria · noviembre de 2026
 
 ---
 
-### Referencias
+## Resumen
 
-- Chen y otros, *Pre-Training for Query Rewriting in a Spoken Language Understanding System*: https://arxiv.org/pdf/2002.05607.pdf
-- *Personalized Query Rewriting in Conversational AI Agents*: https://arxiv.org/pdf/2011.04748
-- Shin y otros, *Constrained Language Models Yield Few-Shot Semantic Parsers* (EMNLP 2021): https://arxiv.org/abs/2104.08768
-- *Fewer Hallucinations, More Verification: A Three-Stage LLM-Based Framework for ASR Error Correction*: https://arxiv.org/pdf/2505.24347
-- *CallScreenBench: Benchmarking Small Language Models as Phone Secretaries*: https://arxiv.org/pdf/2608.01033
-- Twilio, *A Guide to Core Latency in AI Voice Agents*: https://www.twilio.com/en-us/blog/developers/best-practices/guide-core-latency-ai-voice-agents
+Construimos el modo llamada del asistente de una tienda en línea: el cliente habla, el sistema responde con voz, consulta precios reales y arma el carrito. Todo corre en un servidor propio con dos modelos cuantizados que suman 6,7 GB de pesos.
 
-*Las cifras propias provienen de mediciones internas del 23 de noviembre de 2026 sobre 13 bancos de frases etiquetadas. Este texto se redactó con ayuda de inteligencia artificial.*
+Tres resultados, medidos sobre 1.362 turnos etiquetados:
+
+| Hallazgo | Cifra |
+|---|---|
+| Dejar que el modelo **decida** intención y producto triplica los turnos dañinos | de 9 a 29 |
+| Pedirle solo que **reescriba** la frase y dejar la decisión a reglas sube el acierto sin ese costo | 1.214 → 1.251 turnos bien, 10 dañinos |
+| Un filtro determinista sobre la reescritura no cuesta acierto y elimina 5 de los 6 daños que la reescritura añade | 15 → 10 dañinos, 1.248 → 1.251 bien |
+
+El modelo de lenguaje interviene en cerca del 10 % de los turnos y tarda 0,61 s de mediana. El resto se resuelve en milisegundos.
+
+La tesis: en un agente de voz de dominio cerrado, la variable que más pesa no es el tamaño del modelo sino **el tamaño de la tarea que se le asigna**.
+
+## 1. El problema
+
+Un agente de voz para una ferretería tiene tres restricciones que un chat escrito no tiene:
+
+1. **Lo dicho no se retira.** Un precio equivocado dicho en voz alta ya llegó al cliente. No hay «editar mensaje».
+2. **La entrada llega rota.** El texto que recibe el sistema es la salida de un reconocedor de voz. «Deme tres» llega como «Dermatrés»; «écheme diez pliegos», como «H me 10 pliegos».
+3. **El silencio es un error.** Pasado un segundo sin respuesta, la persona repite o cuelga.
+
+A eso se suma la restricción del negocio: el cliente es una pyme. Un costo por llamada atado a un modelo grande de terceros, y las conversaciones de sus clientes saliendo a otro proveedor, no eran aceptables.
+
+## 2. Arquitectura
+
+La llamada es una cadena de tres etapas con un plano de decisión determinista en el medio.
+
+<pre class="mermaid">
+flowchart LR
+    N["Navegador<br/>micrófono + AudioWorklet<br/>PCM 16 kHz"] -- "WebSocket" --> S
+    subgraph S["Servidor de la llamada (Python, FastAPI)"]
+        direction TB
+        T["Cierre de turno<br/>600 ms de silencio"] --> O["Oír"]
+        O --> G["Guion determinista<br/>reglas + catálogo real"]
+        G -- "entendió" --> R["Frase exacta<br/>cifras en letras"]
+        G -- "no entendió" --> W["Reescritura<br/>+ filtro"]
+        W -- "frase limpia" --> G
+        R --> H["Hablar"]
+    end
+    O <--> A[("LFM3-Audio-2B<br/>llama.cpp")]
+    H <--> A
+    W <--> M[("MiMo-V2.6 9B<br/>llama.cpp")]
+    G <--> D[("PostgreSQL<br/>catálogo, envíos,<br/>horario")]
+    H -- "audio 24 kHz + texto" --> N
+</pre>
+
+### Modelos y servicio
+
+| | Voz (oír y hablar) | Lenguaje (reescribir) |
+|---|---|---|
+| Modelo | LFM3-Audio-2B | MiMo-V2.6-Distill-Qwen-9B |
+| Parámetros | 1,73 mil millones | 8,95 mil millones |
+| Cuantización | Q4_K_M | Q4_K_M |
+| Tamaño en disco | 1,09 GB | 5,62 GB |
+| Contexto configurado | 8.192 fichas | 16.384 fichas |
+| Ranuras paralelas | 4 | 2 |
+| Servidor | llama.cpp (`llama-server`, compilación b12602) | igual |
+| Interfaz | `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/realtime` | `/v1/chat/completions` con `response_format: json_schema` |
+| Razonamiento | no aplica | desactivado (`enable_thinking: false`) |
+| Velocidad medida | transcribe un turno en 0,27 s; empieza a sonar en 0,24 s | 49 fichas por segundo |
+
+Los dos modelos comparten una sola tarjeta gráfica. El navegador nunca habla con ellos: habla con el servidor de la llamada, que impone los topes (10 minutos por llamada, 30 s por turno, 2 llamadas simultáneas por defecto).
+
+### Por qué una cadena y no un modelo de voz a voz
+
+Lo probamos. El modelo de voz, conversando por su cuenta con el catálogo a la vista, inventó precios y productos («sí, tenemos taladros»), y usó la herramienta de agregar al carrito en 0 de 4 intentos. Lo que sí hace bien es repetir al pie de la letra una frase que se le entrega. La cadena permite comprobar cada cifra antes de pronunciarla.
+
+## 3. El turno, paso a paso
+
+<pre class="mermaid">
+flowchart TD
+    A["Turno cerrado: transcripción"] --> B{"¿Alguna regla<br/>la reconoce?"}
+    B -- "sí (≈ 90 %)" --> C["Guion responde<br/>con datos reales"]
+    B -- no --> P["En paralelo"]
+    P --> E["Buscar en lo que la empresa<br/>le enseñó al asistente"]
+    P --> F["Modelo: reescribir en limpio<br/>(flujo, JSON)"]
+    F --> G{"¿El guion entiende<br/>la frase reescrita?"}
+    G -- sí --> H{"¿Pasa el filtro?"}
+    H -- sí --> C
+    H -- no --> I["«No te entendí bien»"]
+    G -- no --> J{"Clase que dio<br/>el modelo"}
+    J -- no_claro --> I
+    J -- fuera --> K["«Con eso no te puedo ayudar…»"]
+    J -- pregunta --> L{"¿Lo enseñado<br/>la responde?"}
+    E --> L
+    L -- sí --> M2["Responde con lo enseñado"]
+    L -- no --> N2["«Ese dato no lo tengo a la mano»<br/>queda en la lista de la dueña"]
+</pre>
+
+Dos propiedades de este flujo importan más que el resto:
+
+- **El camino feliz no toca al modelo de lenguaje.** Nueve de cada diez turnos se deciden con reglas.
+- **Todo desvío termina en el mismo guion.** El modelo no tiene un camino propio hacia la respuesta.
+
+## 4. El guion determinista
+
+El guion es código, no un modelo. Hace cuatro cosas:
+
+**Corrige por sonido contra el catálogo.** Antes de interpretar, normaliza cada palabra a cómo suena en español y la compara con los productos y ciudades de la tienda:
+
+```python
+def _son(w: str) -> str:
+    """«thinner» y «tiner», «nequi» y «neki», «cali» y «kali» quedan iguales."""
+    w = w.replace("th", "t").replace("ph", "f").replace("sh", "ch")
+    w = re.sub(r"g(?=[ei])", "j", w)
+    w = re.sub(r"qu(?=[ei])", "k", w)
+    w = re.sub(r"c(?=[ei])", "s", w)
+    w = w.replace("c", "k").replace("z", "s").replace("v", "b").replace("ll", "y").replace("h", "")
+    return re.sub(r"(.)\1+", r"\1", w)
+```
+
+**Clasifica entre 16 intenciones** con expresiones regulares: precio, disponibilidad, agregar al carrito, quitar, ver carrito, pagar, envío, horario, ubicación, medios de pago, hablar con una persona, saludo, gracias, despedida, afirmación y negación. Lo que no encaja queda como `otro`.
+
+**Mantiene el estado de la conversación:** de qué producto se venía hablando, qué opciones se ofrecieron, qué quedó pendiente de confirmar. Eso resuelve «¿y cuánto vale?» o «mejor que sean cinco».
+
+**Arma la frase exacta,** con precios y horas en letras («diecisiete mil ochocientos cincuenta pesos»), porque el modelo de voz lee mal las cifras. Y nunca agrega al carrito sin confirmación: pregunta «¿Agrego dos unidades de…?» y espera el sí.
+
+El guion solo entiende 1.214 de 1.362 turnos (89 %). Ese 11 % restante es el problema de este artículo.
+
+## 5. Tres maneras de usar el modelo
+
+### A. El modelo decide
+
+Primera versión: cuando el guion no entiende o no encuentra el producto, el modelo devuelve la interpretación.
+
+```json
+{"intencion": "precio", "producto": 14, "cantidad": null, "ciudad": null}
+```
+
+`producto` es el índice en el catálogo que se le pasa en el aviso. El servidor valida el índice y arma la respuesta.
+
+### B. El modelo reescribe
+
+Segunda versión: el modelo no interpreta. Devuelve la frase del cliente en limpio y una etiqueta gruesa.
+
+```json
+{"frase": "Deme tres", "clase": "tienda"}
+```
+
+`clase` es una de `tienda`, `pregunta`, `fuera`, `no_claro`. La frase vuelve a entrar al mismo guion de la sección 4. El aviso le fija el papel:
+
+> Tu ÚNICO trabajo es reescribir lo que dijo ESA PERSONA (el cliente), en limpio, para que el vendedor lo entienda. NO eres el vendedor: nunca respondas, nunca saludes de vuelta, nunca digas si hay o no hay algo. […] Si pide algo que NO está en el catálogo, deja el nombre que dijo: no lo cambies por otro producto.
+
+Como contexto recibe lo último que dijo el asistente, para resolver frases que siguen la conversación:
+
+```json
+{"vendedor_acababa_de_decir": "Sí, tomacorriente doble con polo a tierra cuesta…", "cliente_dijo": "Dermatrés."}
+```
+
+### C. Reescribe, con ejemplos
+
+Tercera versión: el mismo aviso más veinte pares de entrada y salida. Algunos:
+
+| Vendedor acababa de decir | Cliente dijo | Debe salir |
+|---|---|---|
+| — | «H me dos cajas de la piceros negros.» | «Agrégame dos cajas de lapiceros negros» |
+| «Sí, cuaderno argollado de cien hojas cuesta ocho mil pesos…» | «Dermacinco.» | «Deme cinco» |
+| — | «a ver, entonces cómo va quedando la cuenta» | «¿Qué llevo en el carrito?» |
+| — | «Ustedes venden morrales.» | «¿Tienen morrales?» |
+| — | «oiga y cómo quedó el partido anoche» | (igual), clase `fuera` |
+
+Los ejemplos son de **otra tienda**, una papelería. Dos razones: que el modelo aprenda la forma sin tomar prestados productos, y no contaminar la evaluación con frases de los bancos de prueba.
+
+## 6. El filtro
+
+Reescribir tampoco es seguro por sí solo. Casos reales:
+
+| Se oyó | El modelo escribió |
+|---|---|
+| «Deme tres bulticos pues» | «Deme tres bombillos LED» |
+| «Kss prr tk» (ruido) | «¿Cuánto vale el alicate universal de ocho pulgadas?» |
+| «ah ya y ustedes dan factura electrónica» | «¿Dónde quedan?» |
+| «Yacajica» | «¿Cuánto cuesta el envío a Yacajica?» |
+
+Cada reescritura que el guion entiende pasa por una función determinista que devuelve el motivo del rechazo, o vacío si se acepta:
+
+```python
+def objecion(dicho, frase, entendido, estado_antes, productos, entrega) -> str:
+    # 1. Producto: tiene que sonar en lo dicho o venir de la conversación
+    # 2. Cantidad > 1: tiene que haberse dicho, en cifras o en palabras
+    # 3. Un número dicho que no es del producto («la de ochenta» ≠ lija nº 120)
+    # 4. Ciudad: reconocida y sonando en lo dicho
+    # 5. Envase dicho ≠ envase del producto («dos bolsas» ≠ tornillos por caja)
+    # 6. Un «sí» nunca decide el carrito; un «no» exige que se haya dicho «no»
+    # 7. Tema: lo dicho debe traer alguna seña de la intención resultante
+```
+
+La comparación es por sonido, tolerante a palabras pegadas o partidas:
+
+```python
+def suena_en(palabra: str, dicho: str) -> bool:
+    s = _son(plano(palabra))
+    sones = [_son(w) for w in plano(dicho).split()]
+    sones += [a + b for a, b in zip(sones, sones[1:])]      # «der ma tres» → «dermatres»
+    tope = 1 if len(s) <= 5 else 2
+    return any(distancia(s, w) <= tope or (len(s) >= 4 and s in w) for w in sones)
+```
+
+La regla 7 merece una nota de diseño. La versión C produce fórmulas («¿Qué llevo en el carrito?») que no comparten palabras con lo dicho («cómo va quedando la cuenta»). Comparar palabra por palabra rechazaba reescrituras correctas. La solución fue pedir evidencia del tema: una tabla de señas por intención (`pedido`, `cuenta`, `llevo` para ver el carrito; `cóbreme`, `pagar` para pagar; `mandan`, `domicilio`, `llega` para envíos), comparadas también por sonido.
+
+Si el guion entiende la frase pero el filtro la frena, la llamada dice «no te entendí bien». Es la respuesta honesta: el modelo puso algo que la persona no dijo.
+
+## 7. Latencia
+
+### Dónde se va el tiempo de la reescritura
+
+Medido contra el servidor, con el aviso real:
+
+| Componente | Fichas | Tiempo |
+|---|---|---|
+| Aviso completo (instrucciones + 20 ejemplos + catálogo de 30 productos) | 2.004 | — |
+| Fichas nuevas por consulta (el resto está en la caché de prefijo de llama.cpp) | 36 | 111 ms |
+| Salida (`frase` + `clase`) | 21 | 409 ms a 49 fichas/s |
+| Red y sobrecarga | — | ≈ 200 ms |
+
+Cuatro decisiones mantienen ese número bajo:
+
+1. **Caché de prefijo.** Con un catálogo de hasta 60 productos, el aviso es idéntico entre consultas y siempre en el mismo orden. Agregar los 20 ejemplos lo llevó de unas 870 a 2.004 fichas sin costo perceptible: solo se evalúan las 36 fichas nuevas.
+2. **Salida mínima.** La reescritura media tiene 5,2 palabras. A 49 fichas por segundo, cada palabra que el modelo no escribe son unos 30 ms.
+3. **Corte temprano.** La respuesta se lee en flujo. `frase` va primero en el esquema: en cuanto se cierra su comilla, el guion la procesa. Si sirve, se cierra la conexión sin esperar `clase`.
+4. **En paralelo.** La reescritura corre a la vez que la búsqueda en la base de conocimiento de la empresa.
+
+Con catálogos de más de 60 productos, al aviso solo van los que suenan a lo dicho y los de la conversación. Ahí se pierde la caché de prefijo; no lo hemos medido a esa escala.
+
+<pre class="mermaid">
+sequenceDiagram
+    participant C as Cliente
+    participant S as Servidor
+    participant V as LFM3-Audio
+    participant G as Guion
+    participant M as MiMo 9B
+    C->>S: audio del turno
+    Note over S: 600 ms de silencio cierran el turno
+    S->>V: transcribir
+    V-->>S: «Dermatrés.» (≈ 270 ms)
+    S->>G: entender
+    G-->>S: otro (≈ 1 ms)
+    S->>M: reescribir (flujo)
+    M-->>S: frase: «Deme tres» (≈ 600 ms)
+    Note over S,M: se corta el flujo, no se espera «clase»
+    S->>G: entender «Deme tres» + filtro
+    G-->>S: agregar, 3 unidades
+    S->>V: leer «¿Agrego tres unidades de…?»
+    V-->>C: primer audio (≈ 240 ms)
+</pre>
+
+Sumando componentes medidos por separado, un turno normal empieza a sonar cerca de 1,1 s después de que la persona calla (0,6 de silencio, 0,27 de oír, 0,24 de voz) y uno reescrito, cerca de 1,7 s. **No es una medición de extremo a extremo**; es la suma de las partes. Si la reescritura pasa de 1,1 s, la llamada dice «Déjame revisar» para no dejar silencio.
+
+### Concurrencia
+
+Con el modelo de voz en una ranura, la respuesta de una llamada empieza a sonar en 0,3 s. Con dos llamadas, igual casi siempre (1,9 s en el peor 10 %). Con tres ya hay esperas de 4 s. Por eso el tope por defecto es dos, y a la tercera se le dice «todas las líneas están ocupadas» en vez de dejarla esperando.
+
+## 8. Evaluación
+
+### Método
+
+- **Datos:** 14 bancos de frases, 1.362 turnos organizados en conversaciones. Cada turno tiene etiquetada la intención esperada, el producto, la cantidad y la ciudad.
+- **Dos versiones de cada frase:** 764 turnos escritos y 598 **transcritos**, es decir, pronunciados y pasados por el reconocedor, con sus errores reales.
+- **Bancos a ciegas:** la mayoría se escribieron sin mirar las reglas, para medir generalización del guion.
+- **Dos métricas.** *Turno bien:* intención, producto, cantidad, ciudad y frase esperada coinciden. *Turno dañino:* el sistema haría o afirmaría algo equivocado: agregar lo que no se pidió, agregar otro producto u otra cantidad, hablar de otro producto, cotizar otra ciudad.
+- **Reproducible sin GPU:** las salidas del modelo quedaron grabadas; la prueba automática las reproduce contra el guion y el filtro.
+
+### Resultados
+
+| Configuración | Turnos bien | % | Dañinos | Mediana del modelo |
+|---|---|---|---|---|
+| Solo guion | 1.214 | 89,1 | 9 | — |
+| A. El modelo decide | 1.228 | 90,2 | **29** | 0,62 s |
+| B. Reescribe + filtro | 1.232 | 90,5 | 10 | 0,74 s |
+| C. Reescribe + ejemplos, **sin filtro** | 1.248 | 91,6 | 15 | 0,61 s |
+| **C. Reescribe + ejemplos + filtro** | **1.251** | **91,9** | **10** | **0,61 s** (p90: 0,73 s) |
+
+<pre class="mermaid">
+xychart-beta
+    title "Turnos dañinos por configuración (menos es mejor)"
+    x-axis ["Solo guion", "A. Decide", "C. Sin filtro", "C. Con filtro"]
+    y-axis "Turnos dañinos" 0 --> 30
+    bar [9, 29, 15, 10]
+</pre>
+
+Por tipo de entrada, con la configuración final:
+
+| | Turnos | Solo guion | Con reescritura | Dañinos |
+|---|---|---|---|---|
+| Escritos | 764 | 718 (94,0 %) | 730 (95,5 %) | 3 → 3 |
+| Transcritos | 598 | 496 (82,9 %) | 521 (87,1 %) | 6 → 7 |
+
+La mejora se concentra donde está el problema: en lo transcrito, 4,2 puntos.
+
+### Qué pasó con los 142 turnos que el guion no entendía
+
+| Desenlace | Turnos |
+|---|---|
+| Reescritura aceptada | 48 |
+| El guion tampoco entiende la frase reescrita | 64 |
+| El modelo no la cambió | 13 |
+| El filtro la frenó | 16 |
+| Sin respuesta del modelo | 1 |
+
+De esos 142, **78 no tenían una intención que rescatar**: eran preguntas legítimas fuera del guion («¿dan factura electrónica?», «¿tienen parqueadero?») o temas ajenos. Ahí el trabajo de la reescritura no es acertar, es clasificar para dar la respuesta adecuada. Los otros 64 sí tenían una intención.
+
+De las 48 aceptadas, 38 produjeron un turno completamente correcto y solo 1 correspondía a una frase que debía quedarse como `otro`.
+
+### La ablación del filtro
+
+Es el resultado que más nos sorprendió. De las 16 reescrituras frenadas:
+
+- **0** habrían producido un turno correcto.
+- **5** habrían producido un turno dañino.
+
+En estos datos el filtro no tiene costo: no rechazó nada que sirviera. Hay que leerlo con cuidado (sección 10), pero la dirección es clara.
+
+### El único daño nuevo
+
+A quien dijo «Dímelo» queriendo decir «deme dos», el sistema reescribe «Deme el destornillador…» y pregunta «¿Agrego una unidad?». El medidor lo cuenta como dañino porque la cantidad no coincide. No se agrega nada: el cliente dice que no y sigue. Antes oía «no te entendí».
+
+## 9. Análisis
+
+### Por qué decidir falla
+
+Un catálogo es un mundo cerrado: lo que no está, no existe. Un modelo de lenguaje opera con el supuesto contrario: siempre hay una mejor continuación. Ante «¿venden candados?» y una lista de 30 productos sin candados, la continuación más probable es el producto más cercano. En la configuración A, eso fue guantes.
+
+No es un defecto de este modelo en particular. Es la consecuencia de pedirle una decisión de pertenencia a un sistema que está entrenado para completar. Las reglas, en cambio, codifican el mundo cerrado de forma nativa: buscan, no encuentran y lo dicen.
+
+### Por qué reescribir funciona
+
+La reescritura separa dos competencias que la configuración A mezclaba:
+
+- **Normalización lingüística:** de «H me 10 pliegos» a «Écheme diez pliegos». Es una tarea de lenguaje, donde un modelo de 9B es más que suficiente.
+- **Decisión sobre datos:** si hay pliegos, cuánto valen, si se agregan. Es una consulta, donde el código es exacto.
+
+Cada parte hace lo que hace bien, y la interfaz entre ambas es una frase en español, que además es inspeccionable: se puede leer en un registro y entender qué pasó.
+
+### El costo es asimétrico
+
+Rechazar una reescritura correcta cuesta un «¿me lo repites?». Aceptar una incorrecta puede costar un producto equivocado en el carrito o un precio falso dicho en voz alta. Con esa asimetría, el filtro puede ser estricto. Y como verifica contra la entrada (¿esto se dijo?) y no contra el mundo (¿esto es cierto?), se resuelve con distancia de edición y sin otro modelo.
+
+### Los ejemplos pesan más que las instrucciones
+
+Pasar de B a C no cambió ninguna instrucción del aviso. Agregó veinte pares. Solo con eso el acierto subió de 1.232 a 1.240 y la latencia bajó 130 ms, porque el modelo dejó de producir frases largas y empezó a usar las fórmulas cortas que el guion espera. Los otros 11 turnos, hasta 1.251, vinieron de adaptar el filtro a esas fórmulas (la regla 7, por señas del tema). Para un modelo pequeño, mostrar el formato de salida resultó más efectivo que describirlo.
+
+### Dónde no sirve
+
+El 45 % de las reescrituras termina en «el guion tampoco la entiende». La reescritura no amplía lo que el sistema sabe hacer; solo acerca lo dicho a lo que ya sabe. Si el cliente pregunta por garantías y el guion no tiene garantías, ninguna reescritura lo arregla. El techo lo pone el guion.
+
+## 10. Amenazas a la validez
+
+- **No hay comparación con un modelo grande.** El título afirma que no hizo falta, no que uno grande lo haría peor. Esa prueba está pendiente.
+- **El filtro se ajustó sobre los mismos bancos con los que se mide.** El resultado «0 rechazos de frases correctas» está inflado por eso. Una comprobación con 16 frases nuevas dio: 10 entendidas por el guion, 3 rescatadas, 1 ajena y 2 frenadas. Es una muestra pequeña.
+- **Lo transcrito se generó con voz sintética,** no con personas. Faltan acentos reales, ruido de calle y micrófonos de celular.
+- **Un solo dominio y un solo idioma:** ferretería, español de Colombia, catálogo de 30 productos.
+- **La latencia de extremo a extremo no está medida,** solo sus componentes.
+- **La configuración A se probó con un disparador más amplio** que las B y C (también cuando el guion no encontraba el producto), así que hizo más consultas. La comparación de daño sigue siendo válida en dirección, no en magnitud exacta.
+
+## 11. Trabajo relacionado
+
+Ninguna de las piezas es nueva por separado:
+
+- Reescribir la consulta antes del módulo de comprensión para reducir errores de voz es una línea establecida en Alexa: [Chen y otros, 2020](https://arxiv.org/pdf/2002.05607.pdf); [reescritura personalizada](https://arxiv.org/pdf/2011.04748).
+- Parafrasear hacia un sublenguaje controlado que un sistema determinista interpreta: [Shin y otros, EMNLP 2021](https://arxiv.org/abs/2104.08768).
+- Corrección de transcripciones con modelos de lenguaje y verificación contra invenciones: [Fewer Hallucinations, More Verification](https://arxiv.org/pdf/2505.24347).
+- Evidencia de que los modelos pequeños se degradan llevando solos una llamada: [CallScreenBench](https://arxiv.org/pdf/2608.01033).
+- Presupuestos de latencia en agentes en cadena: [guía de Twilio](https://www.twilio.com/en-us/blog/developers/best-practices/guide-core-latency-ai-voice-agents).
+
+Lo que aportamos es la combinación medida: activación solo ante fallo del guion, retorno al mismo guion, un filtro por evidencia fonética contra la entrada, y la comparación directa entre decidir y reescribir con una métrica de daño separada del acierto.
+
+## 12. Conclusión
+
+Antes de elegir un modelo más grande, vale la pena hacerse otra pregunta: **¿cuál es la tarea más pequeña que resuelve mi problema?**
+
+En nuestro caso, la tarea pasó de «entiende al cliente y decide qué hacer» a «escribe bien esta frase». Con ese cambio, un modelo de 9B cuantizado a 4 bits, compartiendo tarjeta con un modelo de voz de 2B, alcanzó 91,9 % de turnos correctos con una latencia de 0,61 s en uno de cada diez turnos, y sin costo por llamada.
+
+Cada responsabilidad que se le quita al modelo es un error que ya no puede cometer.
+
+---
+
+*Mediciones internas del 23 de noviembre de 2026. Este texto se redactó con ayuda de inteligencia artificial.*
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral" });
+</script>
