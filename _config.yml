@@ -1,5 +1,5 @@
 title: Su asistente de voz no necesita un cerebro gigante
-description: Arquitectura, mediciones y errores de un agente de voz para comercio que corre con un modelo de 9B y otro de 2B en un servidor propio.
+description: Arquitectura, mediciones y errores de un agente de voz para comercio que corre con cuatro modelos pequeños, el mayor de 9B, en una tarjeta gráfica de consumo.
 lang: es
 theme: jekyll-theme-cayman
 show_downloads: false

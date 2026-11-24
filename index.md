@@ -4,7 +4,7 @@ title: Su asistente de voz no necesita un cerebro gigante
 
 # Su asistente de voz no necesita un cerebro gigante
 
-**Arquitectura, mediciones y errores de un agente de voz para comercio que corre con un modelo de 9B y otro de 2B en un servidor propio.**
+**Arquitectura, mediciones y errores de un agente de voz para comercio que corre con cuatro modelos pequeños, el mayor de 9B, en una tarjeta gráfica de consumo.**
 
 Por: Marlon Torres Lozano · Zentria · noviembre de 2026
 
@@ -12,15 +12,17 @@ Por: Marlon Torres Lozano · Zentria · noviembre de 2026
 
 ## Resumen
 
-Construimos el modo llamada del asistente de una tienda en línea: el cliente habla, el sistema responde con voz, consulta precios reales y arma el carrito. Todo corre en un servidor propio con dos modelos cuantizados que suman 6,7 GB de pesos.
+Construimos el modo llamada del asistente de una tienda en línea: el cliente habla, el sistema responde con voz, consulta precios reales y arma el carrito. Todo corre en un servidor propio, sobre una tarjeta de consumo de 16 GB (AMD Radeon RX 9060 XT), con cuatro modelos pequeños: uno de 9B que reescribe, uno de 2B que habla, uno de 0,8B que oye y uno de 2,2 MB que decide si lo que suena es una voz.
 
-Tres resultados, medidos sobre 1.362 turnos etiquetados:
+Cinco resultados. Los tres primeros, medidos sobre 1.362 turnos etiquetados; los dos últimos, agregados un día después (sección 9):
 
 | Hallazgo | Cifra |
 |---|---|
 | Dejar que el modelo **decida** intención y producto triplica los turnos dañinos | de 9 a 29 |
 | Pedirle solo que **reescriba** la frase y dejar la decisión a reglas sube el acierto sin ese costo | 1.214 → 1.251 turnos bien, 10 dañinos |
 | Un filtro determinista sobre la reescritura no cuesta acierto y elimina 5 de los 6 daños que la reescritura añade | 15 → 10 dañinos, 1.248 → 1.251 bien |
+| Cambiar el oído por un modelo **más pequeño y dedicado** (Whisper turbo en vez del modelo de voz de 2B) sube el acierto en lo transcrito | 541 → 555 de 598, dañinos 5 → 3 |
+| Un detector de voz de 2,2 MB evita que un ruido abra un turno o calle al asistente | ruidos: 0 a 32 ms de «voz»; un «sí»: 256 ms |
 
 El modelo de lenguaje interviene en cerca del 10 % de los turnos y tarda 0,61 s de mediana. El resto se resuelve en milisegundos.
 
@@ -45,15 +47,16 @@ flowchart TB
     N["Navegador: micrófono, PCM 16 kHz"]
     N -- "WebSocket" --> T
     subgraph S["Servidor de la llamada (Python, FastAPI)"]
-        T["Cierre de turno: 600 ms de silencio"] --> O["Oír"]
+        T["Cierre de turno: 600 ms de silencio"] --> V["¿Hay voz? Silero VAD"]
+        V -- "sí" --> O["Oír"]
         O --> G["Guion determinista: reglas + datos reales"]
         G -- "no entendió" --> W["Reescritura + filtro"]
         W -- "frase limpia" --> G
         G -- "entendió" --> R["Frase exacta, cifras en letras"]
         R --> H["Hablar"]
     end
-    O <-.-> A[("LFM3-Audio-2B (llama.cpp)")]
-    H <-.-> A
+    O <-.-> WH[("Whisper turbo 0,8B (whisper.cpp)")]
+    H <-.-> A[("LFM3-Audio-2B (llama.cpp)")]
     W <-.-> M[("MiMo-V2.6 9B (llama.cpp)")]
     G <-.-> D[("PostgreSQL: catálogo, envíos, horario")]
     H -- "audio 24 kHz + texto" --> N
@@ -61,20 +64,20 @@ flowchart TB
 
 ### Modelos y servicio
 
-| | Voz (oír y hablar) | Lenguaje (reescribir) |
-|---|---|---|
-| Modelo | LFM3-Audio-2B | MiMo-V2.6-Distill-Qwen-9B |
-| Parámetros | 1,73 mil millones | 8,95 mil millones |
-| Cuantización | Q4_K_M | Q4_K_M |
-| Tamaño en disco | 1,09 GB | 5,62 GB |
-| Contexto configurado | 8.192 fichas | 16.384 fichas |
-| Ranuras paralelas | 4 | 2 |
-| Servidor | llama.cpp (`llama-server`, compilación b12602) | igual |
-| Interfaz | `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/realtime` | `/v1/chat/completions` con `response_format: json_schema` |
-| Razonamiento | no aplica | desactivado (`enable_thinking: false`) |
-| Velocidad medida | transcribe un turno en 0,27 s; empieza a sonar en 0,24 s | 49 fichas por segundo |
+| | Oír | Hablar | Reescribir | ¿Es una voz? |
+|---|---|---|---|---|
+| Modelo | Whisper large-v3-turbo | LFM3-Audio-2B | MiMo-V2.6-Distill-Qwen-9B | Silero VAD v5 |
+| Parámetros | 809 millones | 1,73 mil millones | 8,95 mil millones | modelo de 2,2 MB |
+| Cuantización | q5_0 | Q4_K_M | Q4_K_M | — |
+| Memoria | 0,9 GB en la tarjeta | 1,09 GB en disco | 5,62 GB en disco | corre en el procesador |
+| Servidor | whisper.cpp 1.9.6 con Vulkan | llama.cpp (b12602) | llama.cpp (b12602) | onnxruntime, dentro del servidor de la llamada |
+| Interfaz | `/v1/audio/transcriptions` | `/v1/audio/speech`, `/v1/realtime` | `/v1/chat/completions` con `json_schema` | función local |
+| Velocidad medida | 0,28 s por turno | empieza a sonar en 0,24 s | 49 fichas por segundo | 0,2 ms por cada 32 ms de audio |
+| Concurrencia | una petición a la vez | 4 ranuras | 2 ranuras | una instancia por llamada |
 
-Los dos modelos comparten una sola tarjeta gráfica. El navegador nunca habla con ellos: habla con el servidor de la llamada, que impone los topes (10 minutos por llamada, 30 s por turno, 2 llamadas simultáneas por defecto).
+Los tres modelos grandes comparten una sola tarjeta gráfica; con todos los servicios arriba quedan ocupados 11,7 de sus 16 GB. El navegador nunca habla con ellos: habla con el servidor de la llamada, que impone los topes (10 minutos por llamada, 30 s por turno, 2 llamadas simultáneas por defecto).
+
+La primera versión, la que se evalúa en la sección 8, oía y hablaba con el mismo modelo (LFM3-Audio-2B) y decidía que alguien hablaba solo por el volumen. El oído dedicado y el detector de voz llegaron después; la sección 9 cuenta por qué y con qué resultado.
 
 ### Por qué una cadena y no un modelo de voz a voz
 
@@ -84,7 +87,10 @@ Lo probamos. El modelo de voz, conversando por su cuenta con el catálogo a la v
 
 <pre class="mermaid">
 flowchart TD
-    A["Turno cerrado: transcripción"] --> B{"¿Alguna regla<br/>la reconoce?"}
+    Z["Turno cerrado"] --> Y{"¿Hay voz<br/>en el audio?"}
+    Y -- no --> X["Se descarta en silencio"]
+    Y -- sí --> A["Transcripción"]
+    A --> B{"¿Alguna regla<br/>la reconoce?"}
     B -- "sí (≈ 90 %)" --> C["Guion responde<br/>con datos reales"]
     B -- no --> P["En paralelo"]
     P --> E["Buscar en lo que la empresa<br/>le enseñó al asistente"]
@@ -241,13 +247,14 @@ Con catálogos de más de 60 productos, al aviso solo van los que suenan a lo di
 sequenceDiagram
     participant C as Cliente
     participant S as Servidor
+    participant O as Whisper
     participant V as LFM3-Audio
     participant G as Guion
     participant M as MiMo 9B
     C->>S: audio del turno
     Note over S: 600 ms de silencio cierran el turno
-    S->>V: transcribir
-    V-->>S: «Dermatrés.» (≈ 270 ms)
+    S->>O: transcribir
+    O-->>S: «Dermatrés.» (≈ 280 ms)
     S->>G: entender
     G-->>S: otro (≈ 1 ms)
     S->>M: reescribir (flujo)
@@ -259,7 +266,7 @@ sequenceDiagram
     V-->>C: primer audio (≈ 240 ms)
 </pre>
 
-Sumando componentes medidos por separado, un turno normal empieza a sonar cerca de 1,1 s después de que la persona calla (0,6 de silencio, 0,27 de oír, 0,24 de voz) y uno reescrito, cerca de 1,7 s. **No es una medición de extremo a extremo**; es la suma de las partes. Si la reescritura pasa de 1,1 s, la llamada dice «Déjame revisar» para no dejar silencio.
+Sumando componentes medidos por separado, un turno normal empieza a sonar cerca de 1,1 s después de que la persona calla (0,6 de silencio, 0,28 de oír, 0,24 de voz) y uno reescrito, cerca de 1,7 s. **No es una medición de extremo a extremo**; es la suma de las partes. Si la reescritura pasa de 1,1 s, la llamada dice «Déjame revisar» para no dejar silencio.
 
 ### Concurrencia
 
@@ -323,13 +330,100 @@ Es el resultado que más nos sorprendió. De las 16 reescrituras frenadas:
 - **0** habrían producido un turno correcto.
 - **5** habrían producido un turno dañino.
 
-En estos datos el filtro no tiene costo: no rechazó nada que sirviera. Hay que leerlo con cuidado (sección 10), pero la dirección es clara.
+En estos datos el filtro no tiene costo: no rechazó nada que sirviera. Hay que leerlo con cuidado (sección 11), pero la dirección es clara.
 
 ### El único daño nuevo
 
 A quien dijo «Dímelo» queriendo decir «deme dos», el sistema reescribe «Deme el destornillador…» y pregunta «¿Agrego una unidad?». El medidor lo cuenta como dañino porque la cantidad no coincide. No se agrega nada: el cliente dice que no y sigue. Antes oía «no te entendí».
 
-## 9. Análisis
+## 9. Dos piezas más: quién oye y quién decide que alguien habla
+
+Las primeras pruebas con personas mostraron dos problemas que los bancos de frases no medían. Los dos se resolvieron igual que el primero: con un modelo más pequeño haciendo una tarea más estrecha.
+
+### 9.1 El oído: un modelo dedicado y más pequeño
+
+En la primera versión, LFM3-Audio-2B hacía dos trabajos: transcribir y hablar. Lo comparamos con Whisper large-v3-turbo cuantizado, que solo transcribe y tiene menos de la mitad de los parámetros. Los 598 turnos transcritos se volvieron a decir con voz sintética y cada oído los transcribió:
+
+| Oído | Guion solo | Con la reescritura | Dañinos | Mediana |
+|---|---|---|---|---|
+| LFM3-Audio-2B | 523 (87,5 %) | 541 (90,5 %) | 5 | 260 ms |
+| Whisper large-v3-turbo | 539 (90,1 %) | 555 (92,8 %) | 3 | 278 ms |
+| Whisper + vocabulario de la tienda como pista | 540 | 557 (93,1 %) | 3 | 292 ms |
+
+Algunos turnos donde cambió el resultado:
+
+| Se dijo | LFM3-Audio oyó | Whisper oyó |
+|---|---|---|
+| «¿Hay tejas?» | «¿Hay Texas?» | «¿Hay tejas?» |
+| «Agrégame el martillo de 16 onzas» | «Agregame el martillo de 16 sonzas.» | «Agrégame el martillo de 16 onzas.» |
+| «Dame una docena de lijas» | «Dame una docena delijas.» | «Dame una docena de lijas.» |
+| «buenas tardes mija cómo me le va» | «Buenas tardes, mija, ¿cómo me levas?» | «Buenas tardes mija como me le va.» |
+
+Tres observaciones:
+
+- **Whisper copia la frase original palabra por palabra en 459 de 594 casos; LFM3-Audio, en 393.** Y gana con desventaja: las reglas de corrección por sonido del guion se habían ajustado a los errores típicos de LFM3-Audio.
+- **La pista de vocabulario no aporta.** Whisper admite un texto con palabras esperadas. Le pasamos los nombres de los productos y las ciudades: dos turnos más, dentro del ruido de la medición, y 14 ms de costo. No se usa.
+- **La reescritura sigue sumando encima.** Con cualquiera de los dos oídos, el paso de mimo agrega entre 16 y 18 turnos. Son mejoras independientes.
+
+El cambio en el código fue una variable de configuración: el oído puede vivir en otro servicio que el de la voz. LFM3-Audio quedó solo para hablar.
+
+### 9.2 El detector de voz: el volumen no distingue un ladrido
+
+El navegador decidía que alguien hablaba cuando el volumen del micrófono pasaba un umbral durante 200 ms. Un ladrido, una puerta o una moto lo pasan igual que una voz. Dos consecuencias:
+
+- Con el asistente callado, el ruido abría un turno. Y los dos oídos, ante audio sin voz, inventan texto:
+
+| Audio | Whisper transcribió | LFM3-Audio transcribió |
+|---|---|---|
+| Silencio | «Gracias.» | «gracias.» |
+| Ruido blanco | «¡Gracias!» | «Gracias.» |
+| Un golpe | «¡Suscríbete al canal!» | «Gracias.» |
+| Ladridos (sintéticos) | «¡Gracias!» | «¡Pum! ¡Pum!» |
+
+  El guion recibía «Gracias» y respondía «Con gusto. ¿Te ayudo con algo más?» a un perro.
+
+- Con el asistente hablando, el ruido contaba como interrupción y lo callaba a mitad de frase.
+
+La solución fue un modelo entrenado solo para eso: Silero VAD, 2,2 MB, que da la probabilidad de voz de cada ventana de 32 ms. Corre en el procesador, dentro del servidor de la llamada, sin tocar la tarjeta.
+
+| Audio | Duración | Voz detectada |
+|---|---|---|
+| Una frase | 2.028 ms | 1.792 ms |
+| «Sí» | 566 ms | 256 ms |
+| Silencio, ruido blanco, tono, golpe, acorde | 1.000 ms | 0 ms |
+| Tres ladridos sintéticos, más fuertes que la voz | 1.340 ms | 32 ms |
+
+El reparto quedó así: el navegador conserva la puerta por volumen, que es barata y está junto al micrófono, y el servidor confirma.
+
+- **Turno sin voz.** Si el detector cuenta menos de 128 ms de voz, el turno no se transcribe ni se contesta.
+- **Interrupción con confirmación.** Si algo suena mientras el asistente habla, el navegador no lo corta: le baja el volumen a una cuarta parte y envía lo que suena. Con 160 ms de voz el servidor responde «voz» y solo entonces se calla al asistente. Si deja de sonar antes, el volumen vuelve y la frase sigue.
+
+<pre class="mermaid">
+sequenceDiagram
+    participant N as Navegador
+    participant S as Servidor
+    participant D as Silero VAD
+    Note over N: el asistente está hablando
+    N->>N: sonido fuerte: baja el volumen al 25 %
+    N->>S: posible (audio, de a 100 ms)
+    S->>D: ¿cuánta voz hay?
+    alt menos de 160 ms de voz
+        N->>S: descartar (dejó de sonar)
+        N->>N: vuelve el volumen, la frase sigue
+    else 160 ms de voz o más
+        S-->>N: voz
+        N->>N: calla al asistente
+        N->>S: interrumpir + resto del turno
+    end
+</pre>
+
+El costo: interrumpir tarda unos 0,2 s más, lo que demora la confirmación. Lo que sonó mientras tanto no se pierde: es el comienzo del turno.
+
+### Lo que confirman estas dos piezas
+
+Ninguna necesitó un modelo más grande. El oído mejoró con un modelo de menos de la mitad del tamaño, porque solo transcribe. Y un problema que el volumen no puede resolver se resolvió con 2,2 MB que solo responden una pregunta: ¿esto es una voz?
+
+## 10. Análisis
 
 ### Por qué decidir falla
 
@@ -358,16 +452,18 @@ Pasar de B a C no cambió ninguna instrucción del aviso. Agregó veinte pares. 
 
 El 45 % de las reescrituras termina en «el guion tampoco la entiende». La reescritura no amplía lo que el sistema sabe hacer; solo acerca lo dicho a lo que ya sabe. Si el cliente pregunta por garantías y el guion no tiene garantías, ninguna reescritura lo arregla. El techo lo pone el guion.
 
-## 10. Amenazas a la validez
+## 11. Amenazas a la validez
 
 - **No hay comparación con un modelo grande.** El título afirma que no hizo falta, no que uno grande lo haría peor. Esa prueba está pendiente.
 - **El filtro se ajustó sobre los mismos bancos con los que se mide.** El resultado «0 rechazos de frases correctas» está inflado por eso. Una comprobación con 16 frases nuevas dio: 10 entendidas por el guion, 3 rescatadas, 1 ajena y 2 frenadas. Es una muestra pequeña.
 - **Lo transcrito se generó con voz sintética,** no con personas. Faltan acentos reales, ruido de calle y micrófonos de celular.
 - **Un solo dominio y un solo idioma:** ferretería, español de Colombia, catálogo de 30 productos.
 - **La latencia de extremo a extremo no está medida,** solo sus componentes.
+- **La comparación de oídos y el detector de voz se midieron con voz sintética y ruidos fabricados.** Un ladrido real, un televisor o una voz al fondo pueden comportarse distinto. Otra persona hablando cerca sigue contando como voz.
+- **Whisper atiende una transcripción a la vez.** A 0,28 s por turno no se nota con dos llamadas; con muchas más habría fila.
 - **La configuración A se probó con un disparador más amplio** que las B y C (también cuando el guion no encontraba el producto), así que hizo más consultas. La comparación de daño sigue siendo válida en dirección, no en magnitud exacta.
 
-## 11. Trabajo relacionado
+## 12. Trabajo relacionado
 
 Ninguna de las piezas es nueva por separado:
 
@@ -379,17 +475,19 @@ Ninguna de las piezas es nueva por separado:
 
 Lo que aportamos es la combinación medida: activación solo ante fallo del guion, retorno al mismo guion, un filtro por evidencia fonética contra la entrada, y la comparación directa entre decidir y reescribir con una métrica de daño separada del acierto.
 
-## 12. Conclusión
+## 13. Conclusión
 
 Antes de elegir un modelo más grande, vale la pena hacerse otra pregunta: **¿cuál es la tarea más pequeña que resuelve mi problema?**
 
-En nuestro caso, la tarea pasó de «entiende al cliente y decide qué hacer» a «escribe bien esta frase». Con ese cambio, un modelo de 9B cuantizado a 4 bits, compartiendo tarjeta con un modelo de voz de 2B, alcanzó 91,9 % de turnos correctos con una latencia de 0,61 s en uno de cada diez turnos, y sin costo por llamada.
+En nuestro caso, la tarea pasó de «entiende al cliente y decide qué hacer» a «escribe bien esta frase». Con ese cambio, un modelo de 9B cuantizado a 4 bits, compartiendo una tarjeta de consumo con los modelos de voz, alcanzó 91,9 % de turnos correctos con una latencia de 0,61 s en uno de cada diez turnos, y sin costo por llamada.
+
+Las dos mejoras siguientes repitieron el patrón: un oído de 0,8B que solo transcribe le ganó a uno de 2B que hacía dos trabajos, y un detector de 2,2 MB resolvió lo que el volumen no podía.
 
 Cada responsabilidad que se le quita al modelo es un error que ya no puede cometer.
 
 ---
 
-*Mediciones internas del 23 de noviembre de 2026. Este texto se redactó con ayuda de inteligencia artificial.*
+*Mediciones internas del 23 y 24 de noviembre de 2026. Este texto se redactó con ayuda de inteligencia artificial.*
 
 <script type="module">
   import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
